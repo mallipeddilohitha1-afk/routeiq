@@ -51,7 +51,17 @@ ACC, AMB, RED, BLUE, GREEN, VIOLET = "#2DD4BF", "#F5B942", "#F87171", "#38BDF8",
 HUB_COL = {"Singapore": ACC, "Dubai": AMB, "Colombo": RED, "Port Klang": BLUE}
 STATUS_KIND = {"Delivered": "ok", "In transit": "info", "At hub": "info", "Packed": "mute", "Delayed": "bad", "Scheduled": "mute"}
 
-PERSIST = ["cfg_name", "cfg_role", "cfg_company", "cfg_holding", "cfg_gap", "sim_days"] + \
+# ---- Currencies (assumed fixed demo rates: units of currency per 1 USD) ----
+CUR = {"USD": ("$", 1.0), "INR": ("₹", 88.0), "EUR": ("€", 0.92), "GBP": ("£", 0.78), "CNY": ("¥", 7.2),
+       "JPY": ("JP¥", 150.0), "KRW": ("₩", 1380.0), "AUD": ("A$", 1.5), "CAD": ("C$", 1.37), "BRL": ("R$", 5.5),
+       "ZAR": ("R", 18.0), "KES": ("KSh", 129.0), "SAR": ("SAR ", 3.75), "AED": ("AED ", 3.67), "NGN": ("₦", 1500.0),
+       "TRY": ("₺", 34.0), "PHP": ("₱", 57.0), "PKR": ("Rs ", 280.0), "SGD": ("S$", 1.34)}
+COUNTRY_CUR = {"India": "INR", "China": "CNY", "Japan": "JPY", "South Korea": "KRW", "Germany": "EUR",
+               "Netherlands": "EUR", "UK": "GBP", "USA": "USD", "Canada": "CAD", "Australia": "AUD",
+               "Brazil": "BRL", "South Africa": "ZAR", "Kenya": "KES", "Saudi Arabia": "SAR", "Singapore": "SGD",
+               "Dubai": "AED", "Nigeria": "NGN", "Turkey": "TRY", "Philippines": "PHP", "Pakistan": "PKR"}
+
+PERSIST = ["cfg_name", "cfg_role", "cfg_company", "cfg_holding", "cfg_gap", "sim_days", "cfg_inr"] + \
           [f"w_{p}_{k}" for p in WEIGHTS for k in CRIT]
 
 
@@ -60,7 +70,7 @@ PERSIST = ["cfg_name", "cfg_role", "cfg_company", "cfg_holding", "cfg_gap", "sim
 # ----------------------------------------------------------------------------
 def init_state():
     d = {"cfg_name": "Lohitha", "cfg_role": "Logistics Manager", "cfg_company": "Aiqon Demo Co.",
-         "cfg_holding": 0.05, "cfg_gap": 0.05, "sim_days": 0}
+         "cfg_holding": 0.05, "cfg_gap": 0.05, "sim_days": 0, "cfg_inr": 88.0}
     for p, w in WEIGHTS.items():
         for k in CRIT:
             d[f"w_{p}_{k}"] = int(round(w[k] * 100))
@@ -91,6 +101,52 @@ def holding():
 
 def today():
     return date.today() + timedelta(days=int(st.session_state["sim_days"]))
+
+
+# ----------------------------------------------------------------------------
+# Currency display (all calculations stay in USD; only the display changes)
+# ----------------------------------------------------------------------------
+def _country(port_name):
+    if "," in port_name:
+        return port_name.split(",")[-1].strip()
+    return port_name.split(" (")[0].strip()
+
+
+def _indian_group(n):
+    s = str(int(round(n)))
+    if len(s) <= 3:
+        return s
+    head, tail, parts = s[:-3], s[-3:], []
+    while len(head) > 2:
+        parts.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        parts.insert(0, head)
+    return ",".join(parts + [tail])
+
+
+def fmt_cur(usd, code):
+    sym, rate = CUR[code]
+    if code == "INR":
+        rate = float(st.session_state.get("cfg_inr", rate))
+        return f"{sym}{_indian_group(usd * rate)}"
+    return f"{sym}{usd * rate:,.0f}"
+
+
+def money_list(usd, o_name, d_name):
+    """Amounts in the origin and destination currencies (USD added if only one distinct currency)."""
+    codes = []
+    for n in (o_name, d_name):
+        c = COUNTRY_CUR.get(_country(n), "USD")
+        if c not in codes:
+            codes.append(c)
+    if len(codes) == 1 and codes[0] != "USD":
+        codes.append("USD")
+    return [fmt_cur(usd, c) for c in codes]
+
+
+def money(usd, o_name, d_name):
+    return " · ".join(money_list(usd, o_name, d_name))
 
 
 # ----------------------------------------------------------------------------
