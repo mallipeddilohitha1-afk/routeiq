@@ -1,119 +1,172 @@
-# RouteIQ: Shipment Route Optimization under Cost, Time and Risk
+# 🚢 RouteIQ: Shipment Route Recommender
 
-Aiqon AI Internship take-home assignment: recommend the most suitable shipping route for a shipment by balancing **cost, transit time and risk**, and explain why.
+**Live app:** https://routeiq-route-optimizer.streamlit.app/
 
-- **Live app:** <(https://routeiq-route-optimizer.streamlit.app/)>
-- **Notebook:** `Aiqon_Shipment_Route_Optimization.ipynb`
+RouteIQ is a decision-support system that recommends the most suitable shipment route by balancing **cost, transit time and risk** under uncertainty, and explains each recommendation in plain language. It was built for the Aiqon AI Internship take-home assignment, *Optimizing Shipment Routes Under Cost, Time, and Risk Constraints*.
+
+> All data is synthetic. Hub profiles, formulas and rates are stated assumptions, not real market data.
 
 ---
 
-## 1. What this project does
+## 1. Problem
 
-For each shipment there are several route options through different transshipment hubs (Singapore, Dubai, Colombo, Port Klang). The system:
+Choosing a shipment route is not simply choosing the shortest or cheapest path. Every route involves trade-offs:
 
-1. **Evaluates** every route option on cost, expected transit time and risk.
-2. **Recommends** one route using a priority-based weighted score.
-3. **Explains** the choice in plain language, for example: *"+$120 vs the cheapest option, arrives 3.1 days sooner, 8.0 points lower delay chance."*
-4. **Flags** close decisions for human review and tests how stable each recommendation is.
+- a cheaper hub may be slower or more delay-prone,
+- a faster hub may cost more,
+- a route may pass through congested or geopolitically risky regions.
+
+These objectives conflict, and delay and risk are uncertain. A useful system must therefore (1) evaluate several route options, (2) recommend one based on explicit criteria, and (3) explain why it is preferred over the alternatives.
 
 ## 2. Defining "optimal"
 
-"Optimal" depends on the shipment's priority, so each priority has its own weights:
+There is no single optimal route. What is best depends on the shipment's **priority**, so "optimal" is defined as the route with the best weighted balance of three criteria:
 
-| Priority | Cost | Time | Risk |
-|---|---|---|---|
-| Urgent | 0.15 | 0.50 | 0.35 |
-| Standard | 0.40 | 0.30 | 0.30 |
-| Economy | 0.65 | 0.10 | 0.25 |
+| Priority | Cost weight | Time weight | Risk weight | Rationale |
+|----------|:-----------:|:-----------:|:-----------:|-----------|
+| Urgent   | 0.15 | 0.50 | 0.35 | Pay more to arrive fast and reliably |
+| Standard | 0.40 | 0.30 | 0.30 | Balanced trade-off |
+| Economy  | 0.65 | 0.10 | 0.25 | Minimise spend, accept slower transit |
 
-Urgent cargo pays for speed, Economy cargo pays for savings.
+The weights are judgement calls that encode business priorities. Because they are subjective, the system tests how sensitive its decisions are to them (see section 6).
 
-## 3. Method
+## 3. Synthetic dataset
 
-- **Expected days** = estimated transit days + delay probability × delay days if late.
-- **Risk** = average of three min-max normalised indicators: delay probability, congestion risk and geopolitical risk.
-- **Score** (lower is better) = cost weight × normalised cost + time weight × normalised expected days + risk weight × normalised risk. Normalisation (min-max) is done **within each shipment**.
-- **Confidence flag:** if the score gap between the best and second-best route is below 0.05, the decision is marked "low confidence, review manually".
+No public dataset captures hub-level cost, delay and risk together, so a synthetic dataset was constructed (30 shipments, 112 route options, fixed random seed).
 
-## 4. Synthetic dataset
+**Construction**
 
-No public dataset was used. The data is synthetic and reproducible (`numpy` seed 42).
+- Five trade lanes (India→USA, China→Germany, Japan→UK, Singapore→Canada, India→Australia), each with a base cost and base transit time.
+- Four transshipment hubs, each with a "personality". A hub is excluded if it is the shipment's origin or destination.
+- Each route's values are the lane base multiplied by the hub factor and a small random noise term.
 
-- **30 shipments**, each with **3 to 4 route options** (a hub equal to the origin or destination is skipped), 106 or so route records in `shipments.csv`.
-- **Lanes** (origin, destination, base cost USD, base days): India→USA (2000, 30), China→Germany (2500, 35), Japan→UK (2300, 32), Singapore→Canada (2200, 34), India→Australia (1500, 20).
-- **Hub profiles** (assumptions):
+**Hub personalities (assumptions)**
 
 | Hub | Cost factor | Time factor | Delay prob. | Congestion | Geopolitical | Days if late |
-|---|---|---|---|---|---|---|
-| Singapore | 1.20 | 0.80 | 0.08 | 25 | 15 | 2 |
-| Dubai | 1.00 | 0.90 | 0.16 | 60 | 45 | 3 |
-| Colombo | 0.85 | 1.25 | 0.25 | 55 | 35 | 5 |
-| Port Klang | 1.05 | 1.10 | 0.10 | 20 | 5 | 2 |
+|-----|:----:|:----:|:----:|:----:|:----:|:----:|
+| Singapore  | 1.20 | 0.80 | 8%  | 25 | 15 | 2 |
+| Dubai      | 1.00 | 0.90 | 16% | 60 | 45 | 3 |
+| Colombo    | 0.85 | 1.25 | 25% | 55 | 35 | 5 |
+| Port Klang | 1.05 | 1.10 | 10% | 20 | 5  | 2 |
 
-- Each shipment's cost, time, delay probability and risk values are the hub profile plus random noise, clipped to valid ranges.
-- Priority mix: Urgent 25%, Standard 50%, Economy 25%.
+**Intent.** Cheap hubs (Colombo) are slow and delay-prone. Fast hubs (Singapore) are expensive but reliable. Dubai carries the highest geopolitical risk. No hub dominates on every criterion, so every decision is a genuine trade-off.
 
-## 5. Evaluation
+**Fields per route:** origin, destination, intermediate hub, priority, cargo value, shipping cost, estimated transit days, delay probability, delay days if late, congestion risk (0–100), geopolitical risk (0–100).
 
-The recommendation system is compared with three simple rules on all 30 shipments:
+## 4. Scoring framework
 
-- **Always cheapest**, **Always fastest**, **Lowest risk**, and **RouteIQ (weighted score)**.
-- Metrics: average cost, expected days, delay chance and risk score, overall and by priority.
-- **Sensitivity analysis** (200 simulations per shipment): how often the same route is recommended when the priority weights change by ±20%, and when the delay estimates change by ±30%.
-- Shipments whose recommendation changes often are listed as **fragile decisions** for human review.
+### 4.1 Expected delivery time
 
-Results are in the notebook outputs and in the dashboard's **Evaluation** and **Sensitivity** tabs.
-
-## 6. Project structure
+Delay is uncertain, so transit time is adjusted by its expected delay:
 
 ```
-├── Aiqon_Shipment_Route_Optimization.ipynb   # main solution: data, scoring, evaluation, sensitivity
-├── shipments.csv                             # synthetic dataset produced by the notebook
-├── app.py                                    # Streamlit entry point (page navigation)
-├── views.py                                  # app pages; the Dashboard follows the notebook logic
-├── core.py                                   # shared theme, charts and the extended demo model
-├── requirements.txt
-└── README.md
+expected_days = transit_days + delay_probability × delay_days_if_late
 ```
 
-## 7. How to run
+### 4.2 Normalisation
 
-**Notebook:** open it in Google Colab and choose *Runtime → Run all*. To run locally:
+Cost, expected days and each risk indicator are **min-max normalised within a shipment**:
 
-```bash
-pip install pandas numpy matplotlib seaborn ipywidgets jupyter
-jupyter notebook Aiqon_Shipment_Route_Optimization.ipynb
+```
+norm(x) = (x − min) / (max − min)
 ```
 
-**Dashboard app (Python 3.11):**
+This maps the best option to 0 and the worst to 1, so criteria measured in dollars, days and percentages become comparable. Normalising within a shipment compares options only against that shipment's own alternatives.
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
+### 4.3 Composite risk
+
+```
+risk = ( norm(delay_probability) + norm(congestion) + norm(geopolitical) ) / 3
 ```
 
-## 8. App pages
+### 4.4 Weighted score
 
-- **Dashboard** (from the notebook): dataset overview, hub scorecard, risk comparison, trade-off map, route recommendation with explanation, evaluation against baselines, sensitivity analysis, assumptions and data-quality report.
-- **Shipping, Tracking, Invoice, Compare, Reports, Settings** (extended demo): these pages extend the same idea to any origin and destination using a distance and parcel-weight cost model, a Monte Carlo on-time probability, a TOPSIS cross-check, a simulated tracking view and origin and destination currencies. They use a different cost model from the notebook and are not part of the notebook's results.
+```
+score = w_cost × norm(cost) + w_time × norm(expected_days) + w_risk × risk
+```
 
-## 9. Assumptions
+The route with the **lowest score** is recommended. Weighted scoring was chosen because it is transparent, easy to explain to a logistics operator, and lets priority change the outcome directly.
 
-- All data is synthetic. Hub profiles, weights, base costs, fees and the demo exchange rates (for example USD to INR 88) are assumptions, not real tariffs or live rates.
-- Priority weights were chosen by judgement, not learned from data.
-- Delay is modelled as a single probability and a fixed number of delay days per hub.
-- The extended app pages use assumed freight rates per kg per 1,000 km, with bulk discounts by weight.
+### 4.5 Confidence check
 
-## 10. Limitations
+The gap between the best and second-best score measures how clear the decision is:
 
-- **Min-max normalisation** within each shipment makes the best option on a criterion score 0 and the worst score 1, even when the real difference is small. This can exaggerate small gaps. The score-gap flag and the stability tests reduce, but do not remove, this effect.
-- Synthetic data cannot capture real port disruptions, seasonality or carrier pricing.
-- With only 3 to 4 options per shipment, a single noisy value can change the winner.
-- Weights are fixed per priority level, so the system does not learn from past decisions.
+```
+gap = score(2nd best) − score(best)
+```
 
-## 11. Future work
+If the gap is below a review threshold (0.05), the system flags the recommendation as **low confidence** for manual review rather than presenting a false-certain answer.
 
-- Calibrate hub profiles with real carrier and port-performance data.
-- Learn or elicit weights from planners instead of fixing them.
-- Normalise against absolute reference ranges instead of within each shipment.
-- Add live congestion and geopolitical risk feeds.
+## 5. Handling conflicting objectives and uncertainty
+
+### 5.1 TOPSIS cross-check
+
+A second, independent method guards against the choice of scoring formula. TOPSIS ranks each route by its relative closeness to an ideal solution (best on every criterion) and distance from an anti-ideal solution (worst on every criterion). It uses five criteria: cost, expected days, delay probability, congestion and geopolitical risk, with the risk weight split equally across the three risk indicators. When weighted scoring and TOPSIS select the same hub, confidence in the decision rises. Disagreement signals a close trade-off.
+
+### 5.2 Monte Carlo on-time probability
+
+Point estimates hide uncertainty, so each route is simulated thousands of times. In each simulated journey:
+
+- the delay probability is drawn from a **Beta** distribution centred on the estimate,
+- base transit time is drawn from a **Normal** distribution (±4%),
+- if a delay occurs, its length is drawn from a **Gamma** distribution.
+
+From these samples the system reports the **on-time probability** against a deadline and the **P90 transit time** (the duration that 90% of journeys beat). Deadlines scale with priority: base days × 1.0 for Urgent, × 1.25 for Standard, × 1.5 for Economy.
+
+## 6. Explainability
+
+Every recommendation is compared with three reference routes: the cheapest, the fastest and the lowest-risk. The explanation states the difference in cost, arrival time and delay probability. For example:
+
+> *Versus the cheapest option (Colombo): +$310, arrives 6.2 days sooner, −17.0 points delay chance.*
+
+It also identifies which criterion contributed the smallest penalty to the winning route, so an operator can see why a slightly more expensive route can win through much lower delay risk.
+
+## 7. Evaluation
+
+Since this is a decision problem with no ground-truth "correct" route, evaluation compares RouteIQ against simple rules and tests its robustness.
+
+### 7.1 Baseline comparison
+
+Four strategies are compared on average cost, expected days, delay probability and risk, overall and by priority:
+
+- always cheapest,
+- always fastest,
+- lowest risk,
+- RouteIQ (weighted score).
+
+The share of shipments where RouteIQ picks the same hub as each simple rule shows whether it makes real trade-offs. A low overlap means it is not simply copying one rule. Results by priority should show the weighting at work: Urgent shipments favour speed, Economy shipments favour cost.
+
+### 7.2 Sensitivity and decision stability
+
+For each shipment, 200 simulations re-run the decision with perturbed inputs:
+
+- **Weight sensitivity:** each weight randomly varied by ±20%, then renormalised.
+- **Estimate uncertainty:** delay probabilities varied by ±30%.
+
+**Decision stability** is the share of simulations in which the recommendation stays the same (1.0 = never changes). Shipments with low stability are **fragile decisions**, listed for human review. This directly addresses the assignment's challenges of parameter sensitivity and uncertain delay estimates.
+
+## 8. Extensions in the application
+
+Beyond the 30-shipment dataset, the app generalises the same logic to any pair of 24 world ports:
+
+- **Distance and detour:** great-circle (haversine) distances. Routing through a hub adds a detour ratio that raises cost and time.
+- **Weight-based pricing:** freight cost scales with distance and parcel weight, with bulk discounts for heavy loads and a premium for light parcels, plus a documentation fee and minimum charge.
+- **Seasonality:** some hubs have month-dependent delay uplifts (for example monsoon months at Colombo).
+- **Business costs:** hub handling fees, cargo insurance, and an inventory holding cost for capital tied up in transit.
+
+## 9. Assumptions and limitations
+
+- **Synthetic data:** hub profiles, noise levels and lanes are invented. Conclusions about specific hubs are illustrative, not factual.
+- **Simplified routes:** each option is one origin → hub → destination path, with no vessel schedules, chokepoints or live data.
+- **Assumed economics:** freight rates, fees, insurance and exchange rates are demo values.
+- **Relative scores:** min-max normalisation ranks options within a shipment, so scores are not comparable across shipments. It is also sensitive to outliers when there are few options.
+- **Subjective weights:** the priority weights reflect judgement, not learned preferences.
+- **Independent risk indicators:** delay, congestion and geopolitical risk are averaged equally and treated as independent, though in reality they correlate.
+- **Small samples:** the evaluation demonstrates behaviour but does not prove statistical performance.
+
+## 10. Future work
+
+- Replace synthetic profiles with real port performance and freight-rate data.
+- Support true multi-leg routes and Pareto-front multi-objective optimisation.
+- Learn delay probabilities and priority weights from historical shipment outcomes.
+- Add cargo-specific constraints such as perishables, customs clearance and carrier capacity.
