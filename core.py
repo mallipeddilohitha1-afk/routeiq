@@ -27,6 +27,22 @@ HUBS = {  # lat, lon, cost_factor, time_factor, delay, congestion, geopolitical,
     "Port Klang": (3.00, 101.39, 1.05, 1.10, 0.10, 20, 5, 2),
 }
 HUB_FEE = {"Singapore": 210, "Dubai": 170, "Colombo": 120, "Port Klang": 140}   # USD, assumed
+
+# ---- Freight pricing (assumed demo values) ----
+RATE_PER_KG_1000KM = 0.014          # USD per kg per 1,000 km
+FIXED_FEE, MIN_CHARGE = 150, 300    # USD documentation fee, minimum freight charge
+HUB_FEE_PER_TONNE = 6               # USD extra hub handling per tonne
+
+
+def weight_tier(kg):
+    """Bulk factor: lighter parcels pay more per kg, heavy loads get a discount."""
+    return 1.25 if kg < 500 else 1.0 if kg <= 5000 else 0.8 if kg <= 20000 else 0.7
+
+
+def hub_fee(hub, kg):
+    return HUB_FEE[hub] + HUB_FEE_PER_TONNE * kg / 1000
+
+
 SEASON = {"Colombo": {6: .10, 7: .12, 8: .10, 9: .08, 10: .04},
           "Port Klang": {11: .06, 12: .06, 1: .06}, "Singapore": {1: .04, 2: .06}}
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -175,12 +191,13 @@ def minmax(s):
     return (s - s.min()) / span if span > 0 else s * 0
 
 
-def build_options(o_name, o, d_name, d, month):
-    """One route option per usable hub, for ANY origin/destination."""
+def build_options(o_name, o, d_name, d, month, weight_kg=5000):
+    """One route option per usable hub, for ANY origin/destination, priced by parcel weight."""
     direct = haversine(o, d)
     if direct < 300:
         return None, "Origin and destination are too close for an ocean shipment. Pick places that are further apart."
-    base_cost, base_days = 350 + 0.135 * direct, 6 + direct / 650
+    base_cost = max(MIN_CHARGE, FIXED_FEE + RATE_PER_KG_1000KM * (direct / 1000) * weight_kg * weight_tier(weight_kg))
+    base_days = 6 + direct / 650
     rows = []
     for hub, (la, lo, cf, tf, dl, cg, gp, late) in HUBS.items():
         if haversine(o, (la, lo)) < 400 or haversine(d, (la, lo)) < 400:
@@ -267,14 +284,15 @@ def explain(r):
 # ----------------------------------------------------------------------------
 # Bookings (demo shipments) and status
 # ----------------------------------------------------------------------------
-def make_booking(i, o_name, d_name, pr, cargo, ship_date, rng, best, base_days, gap, o, d):
+def make_booking(i, o_name, d_name, pr, cargo, ship_date, rng, best, base_days, gap, o, d, weight_kg=5000):
     late = bool(rng.random() < best.delay_p)
     actual = best.days * rng.normal(1, 0.04) + (rng.gamma(4, best.late_days / 4) if late else 0)
     return {"id": f"SHP{1000 + i}", "origin": o_name, "dest": d_name, "o": o, "d": d, "hub": best.hub,
             "hub_pos": (best.lat, best.lon), "leg_share": float(best.leg_share), "route": best.route, "priority": pr,
-            "cargo": int(cargo), "ship_date": ship_date, "planned": float(best.expected_days), "actual": float(max(actual, 3)),
-            "late": late, "cost": float(best.cost), "on_time": float(best.on_time), "p_delay": float(best.delay_p),
-            "gap": float(gap), "deadline": float(base_days * DEADLINE_MULT[pr]), "month": ship_date.month}
+            "cargo": int(cargo), "weight_kg": int(weight_kg), "ship_date": ship_date, "planned": float(best.expected_days),
+            "actual": float(max(actual, 3)), "late": late, "cost": float(best.cost), "on_time": float(best.on_time),
+            "p_delay": float(best.delay_p), "gap": float(gap), "deadline": float(base_days * DEADLINE_MULT[pr]),
+            "month": ship_date.month}
 
 
 def seed_bookings(n=22, seed=5):
@@ -284,21 +302,22 @@ def seed_bookings(n=22, seed=5):
         a, b = rng.choice(len(names), 2, replace=False)
         pr = str(rng.choice(list(WEIGHTS), p=[.25, .5, .25]))
         sd = date.today() - timedelta(days=int(rng.integers(0, 75)))
-        g, base = build_options(names[a], PORTS[names[a]], names[b], PORTS[names[b]], sd.month)
+        wt = int(rng.integers(2, 200)) * 100                      # 200 to 19,900 kg
+        g, base = build_options(names[a], PORTS[names[a]], names[b], PORTS[names[b]], sd.month, wt)
         if g is None:
             continue
         r = simulate(score(g, weights_for(pr)), base * DEADLINE_MULT[pr], n=800)
         out.append(make_booking(i, names[a], names[b], pr, rng.integers(50, 900) * 1000, sd, rng, r.iloc[0], base,
-                                r.score.iloc[1] - r.score.iloc[0], PORTS[names[a]], PORTS[names[b]]))
+                                r.score.iloc[1] - r.score.iloc[0], PORTS[names[a]], PORTS[names[b]], wt))
         i += 1
     return sorted(out, key=lambda x: x["ship_date"])
 
 
-def add_booking(r, base_days, o_name, o, d_name, d, pr, cargo):
+def add_booking(r, base_days, o_name, o, d_name, d, pr, cargo, weight_kg=5000):
     bk = st.session_state["bookings"]
     rng = np.random.default_rng(len(bk) + 99)
     b = make_booking(len(bk), o_name, d_name, pr, cargo, date.today(), rng, r.iloc[0], base_days,
-                     r.score.iloc[1] - r.score.iloc[0], o, d)
+                     r.score.iloc[1] - r.score.iloc[0], o, d, weight_kg)
     bk.append(b)
     return b
 
@@ -342,7 +361,7 @@ def daily_series(bks, t, days=45):
 
 
 # ----------------------------------------------------------------------------
-# Cached portfolio evaluation (60 synthetic shipments)
+# Cached portfolio evaluation (60 synthetic shipments, 5-tonne reference parcels)
 # ----------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def portfolio_eval(wk, gap, n=60, seed=42):
