@@ -76,7 +76,7 @@ def dashboard():
             st.info("No active shipments.")
     st.write("")
 
-    st.markdown('<div class="card-t">RouteIQ vs simple rules (60 demo shipments)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card-t">RouteIQ vs simple rules (60 demo shipments, USD)</div>', unsafe_allow_html=True)
     ships, strat = C.portfolio_eval(C.wkey(), C.review_gap())
     s = strat.groupby("strategy")[["cost", "expected_days", "on_time"]].mean()
     cols = st.columns(4)
@@ -133,7 +133,8 @@ def shipping():
     with k[0]:
         kpi("🏆", "Recommended hub", best.hub, "needs review" if review else "high confidence", "warn" if review else "ok")
     with k[1]:
-        kpi("💲", "Cost", f"${best.cost:,.0f}", f"hub fee ≈ ${C.HUB_FEE[best.hub]}", "info")
+        parts = C.money_list(best.cost, o_name, d_name)
+        kpi("💲", "Cost", parts[0], "≈ " + " · ".join(parts[1:]) + f" · hub fee ${C.HUB_FEE[best.hub]}", "info")
     with k[2]:
         kpi("⏱️", "Expected days", f"{best.expected_days:.1f}", f"P90: {best.p90:.1f} days", "info")
     with k[3]:
@@ -158,11 +159,12 @@ def shipping():
 
     with st.container(border=True):
         st.markdown('<div class="card-t">All options ranked (lower score = better)</div>', unsafe_allow_html=True)
-        rows = [[x.route, f"${x.cost:,.0f}", f"{x.expected_days:.1f}", f"{x.delay_p * 100:.1f}%",
+        rows = [[x.route, C.money(x.cost, o_name, d_name), f"{x.expected_days:.1f}", f"{x.delay_p * 100:.1f}%",
                  f"{x.congestion:.0f}", f"{x.geo:.0f}", f"{x.on_time * 100:.0f}%", f"{x.score:.3f}"]
                 for x in r.itertuples()]
         table(["Route", "Cost", "Expected days", "Delay chance", "Congestion", "Geopolitical", "On-time", "Score"],
               rows, hl=0)
+        st.caption("Costs are shown in the origin and destination currencies using assumed demo exchange rates.")
     st.write("")
 
     if st.button("📦 Book this shipment"):
@@ -191,7 +193,8 @@ def tracking():
     with k[2]:
         kpi("🎯", "On-time chance", f"{pick['on_time'] * 100:.0f}%", f"deadline {pick['deadline']:.0f} days", "info")
     with k[3]:
-        kpi("💲", "Freight cost", f"${pick['cost']:,.0f}", pick["priority"], "mute")
+        parts = C.money_list(pick["cost"], pick["origin"], pick["dest"])
+        kpi("💲", "Freight cost", parts[0], "≈ " + " · ".join(parts[1:]) + f" · {pick['priority']}", "mute")
     st.write("")
 
     a, b = st.columns([1.8, 1])
@@ -226,22 +229,23 @@ def invoice():
     holding = pick["cargo"] * C.holding() * pick["planned"]  # holding cost per day x planned days
     total = freight + fee + insurance + holding
     delivered = C.status_of(pick, C.today()) == "Delivered"
+    o, dn = pick["origin"], pick["dest"]
 
     with st.container(border=True):
         stamp = '<span class="stamp">PAID</span>' if delivered else '<span class="stamp">DUE</span>'
         rows = [("Ocean freight", freight), (f"Hub handling fee ({pick['hub']})", fee),
                 ("Cargo insurance (0.3% assumed)", insurance),
                 (f"Inventory holding ({st.session_state['cfg_holding']}%/day × {pick['planned']:.1f} days)", holding)]
-        body = "".join(f"<tr><td>{n}</td><td style='text-align:right'>${v:,.2f}</td></tr>" for n, v in rows)
+        body = "".join(f"<tr><td>{n}</td><td style='text-align:right'>{C.money(v, o, dn)}</td></tr>" for n, v in rows)
         st.markdown(
             f"""<div class="inv">
             <div style="display:flex;justify-content:space-between"><div><b style="font-size:1.1rem">Invoice {pick['id']}</b><br>
             <small>{st.session_state['cfg_company']}</small></div>{stamp}</div><br>
             <div style="font-size:.84rem">Route: <b>{pick['route']}</b><br>Priority: {pick['priority']} ·
             Cargo value: ${pick['cargo']:,.0f} · Shipped {pick['ship_date']:%d %b %Y}</div><br>
-            <table class="rt">{body}<tr class="tot"><td>Total</td><td style="text-align:right">${total:,.2f}</td></tr></table>
+            <table class="rt">{body}<tr class="tot"><td>Total</td><td style="text-align:right">{C.money(total, o, dn)}</td></tr></table>
             </div>""", unsafe_allow_html=True)
-        st.caption("Demo invoice. Fees, insurance rate and holding cost are assumptions.")
+        st.caption("Demo invoice. Fees, insurance rate, holding cost and exchange rates are assumptions.")
 
 
 # ----------------------------------------------------------------------------
@@ -276,7 +280,7 @@ def compare_scenarios():
             st.markdown(f'<div class="card-t">{pr}</div>', unsafe_allow_html=True)
             st.markdown(f"<div style='font-size:1.5rem;font-weight:700;color:{HUB_COL[best.hub]}'>{best.hub}</div>",
                         unsafe_allow_html=True)
-            st.caption(f"${best.cost:,.0f} · {best.expected_days:.1f} days · {best.on_time * 100:.0f}% on time")
+            st.caption(f"{C.money(best.cost, o_name, d_name)} · {best.expected_days:.1f} days · {best.on_time * 100:.0f}% on time")
             st.caption(f"TOPSIS pick: {t_hub} ({'agrees' if t_hub == best.hub else 'differs'})")
     st.write("")
 
@@ -372,11 +376,12 @@ def settings():
 
     with st.container(border=True):
         st.markdown('<div class="card-t">Business rules</div>', unsafe_allow_html=True)
-        a, b = st.columns(2)
+        a, b, c = st.columns(3)
         a.number_input("Holding cost (% of cargo value per day)", min_value=0.0, max_value=1.0, step=0.01,
                        format="%.2f", key="cfg_holding")
         b.number_input("Review gap (flag when top-two score gap is below)", min_value=0.0, max_value=0.5, step=0.01,
                        format="%.2f", key="cfg_gap")
+        c.number_input("USD → INR rate (demo)", min_value=50.0, max_value=150.0, step=0.5, format="%.1f", key="cfg_inr")
     st.write("")
 
     c1, c2 = st.columns(2)
